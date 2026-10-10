@@ -1,20 +1,11 @@
-"""Bot de alertas de precios por Telegram.
-
-Avisa cuando Repsol, Santander, Apple, Tesla o Bitcoin se mueven mas de UMBRAL %
-desde el ultimo aviso. El token y el chat id vienen de variables de entorno
-(GitHub Secrets), nunca van escritos en el codigo.
-"""
+"""Bot de alertas por Telegram: manda un resumen de precios en cada ejecucion."""
 import json
 import os
 import urllib.parse
 import urllib.request
-from pathlib import Path
-
-UMBRAL = 1.0  # % de cambio minimo para avisar
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-ESTADO = Path(__file__).with_name("estado.json")
 
 ACTIVOS = {
     "Repsol": "REP.MC",
@@ -25,12 +16,15 @@ ACTIVOS = {
 }
 
 
-def obtener_precio(simbolo):
+def obtener_datos(simbolo):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{simbolo}"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as r:
         meta = json.load(r)["chart"]["result"][0]["meta"]
-    return float(meta["regularMarketPrice"]), meta.get("currency", "")
+    precio = float(meta["regularMarketPrice"])
+    anterior = meta.get("chartPreviousClose") or meta.get("previousClose")
+    moneda = meta.get("currency", "")
+    return precio, (float(anterior) if anterior else None), moneda
 
 
 def enviar(texto):
@@ -40,31 +34,20 @@ def enviar(texto):
 
 
 def main():
-    ultimo = json.loads(ESTADO.read_text()) if ESTADO.exists() else {}
-
+    lineas = []
     for nombre, simbolo in ACTIVOS.items():
         try:
-            precio, moneda = obtener_precio(simbolo)
+            precio, anterior, moneda = obtener_datos(simbolo)
+            if anterior:
+                cambio = (precio - anterior) / anterior * 100
+                lineas.append(f"{nombre}: {precio:.2f} {moneda} ({cambio:+.2f}% vs cierre anterior)")
+            else:
+                lineas.append(f"{nombre}: {precio:.2f} {moneda}")
         except Exception as e:
             print(f"No se pudo obtener el precio de {nombre}: {e}")
-            continue
+            lineas.append(f"{nombre}: sin datos")
 
-        # Primera ejecucion: solo guarda el precio de referencia
-        if nombre not in ultimo:
-            ultimo[nombre] = precio
-            continue
-
-        cambio = (precio - ultimo[nombre]) / ultimo[nombre] * 100
-        if abs(cambio) >= UMBRAL:
-            direccion = "SUBE" if cambio > 0 else "BAJA"
-            texto = f"{nombre} {direccion} {cambio:+.2f}%\n{ultimo[nombre]:.2f} -> {precio:.2f} {moneda}"
-            try:
-                enviar(texto)
-                ultimo[nombre] = precio
-            except Exception as e:
-                print(f"No se pudo enviar el mensaje de Telegram: {e}")
-
-    ESTADO.write_text(json.dumps(ultimo, indent=2))
+    enviar("Resumen de precios\n" + "\n".join(lineas))
 
 
 if __name__ == "__main__":
